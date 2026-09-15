@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -23,7 +24,7 @@ jobs:
 
       - name: Install packages
         run: |
-          pip install requests pandas lxml beautifulsoup4
+          pip install requests pandas lxml
 
       - name: Fetch and parse InvestorGain
         run: |
@@ -35,29 +36,23 @@ jobs:
           from io import StringIO
           from datetime import datetime, timezone
 
-          URL = "https://www.investorgain.com/report/ipo-gmp-live/331/"
+          url = "https://www.investorgain.com/report/ipo-gmp-live/331/"
 
           headers = {
-              "User-Agent": (
-                  "Mozilla/5.0 (Linux; Android 10; Mobile) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/140.0 Mobile Safari/537.36"
-              ),
-              "Accept": "text/html,application/xhtml+xml",
-              "Accept-Language": "en-US,en;q=0.9"
+              "User-Agent": "Mozilla/5.0 Chrome/140.0 Safari/537.36"
           }
 
           print("Downloading InvestorGain...")
 
-          response = requests.get(
-              URL,
+          r = requests.get(
+              url,
               headers=headers,
               timeout=30
           )
 
-          response.raise_for_status()
+          r.raise_for_status()
 
-          html = response.text
+          html = r.text
 
           print("Downloaded characters:", len(html))
 
@@ -68,7 +63,7 @@ jobs:
           ) as f:
               f.write(html)
 
-          print("Trying HTML table parser...")
+          print("Reading HTML tables...")
 
           tables = pd.read_html(StringIO(html))
 
@@ -76,41 +71,210 @@ jobs:
 
           records = []
 
-          # InvestorGain columns:
-          #
-          # Name
-          # GMP
-          # Rating
-          # Sub
-          # Price
-          # IPO Size
-          # Lot
-          # Open
-          # Close
-          # BoA Dt
-          # Listing
-          # Updated-On
-          # Anchor
+          for df in tables:
 
-          for table_no, df in enumerate(tables):
-
-              print("")
-              print("======================================")
-              print("TABLE", table_no)
-              print("Rows:", len(df))
-              print("Columns:", len(df.columns))
-              print("Columns:", list(df.columns))
-              print("======================================")
+              print("Table rows:", len(df))
+              print("Table columns:", len(df.columns))
 
               if len(df.columns) < 9:
                   continue
 
-              # Flatten MultiIndex columns if present
-              if isinstance(df.columns, pd.MultiIndex):
-                  df.columns = [
-                      " ".join(
-                          str(x)
-                          for x in col
-                          if str(x).lower() != "nan"
+              for row in df.itertuples(
+                  index=False,
+                  name=None
+              ):
+
+                  if len(row) < 9:
+                      continue
+
+                  def clean(i):
+                      if i >= len(row):
+                          return ""
+
+                      value = row[i]
+
+                      if pd.isna(value):
+                          return ""
+
+                      return str(value).strip()
+
+                  name_raw = clean(0)
+                  gmp_raw = clean(1)
+                  rating_raw = clean(2)
+                  price_raw = clean(4)
+                  lot_raw = clean(6)
+                  open_raw = clean(7)
+                  close_raw = clean(8)
+                  allotment_raw = clean(9)
+
+                  if not name_raw:
+                      continue
+
+                  if "ipo" not in name_raw.lower():
+                      continue
+
+                  if "sme" in name_raw.lower():
+                      continue
+
+                  if name_raw.lower() == "name":
+                      continue
+
+                  name = name_raw
+
+                  status = ""
+
+                  m = re.search(
+                      r"\s+([UOCL])$",
+                      name
+                  )
+
+                  if m:
+                      status = m.group(1)
+                      name = re.sub(
+                          r"\s+[UOCL]$",
+                          "",
+                          name
                       ).strip()
-                      for col in df.columns
+
+                  gmp = 0
+
+                  m = re.search(
+                      r"₹\s*([\d,]+)",
+                      gmp_raw
+                  )
+
+                  if m:
+                      gmp = int(
+                          m.group(1).replace(",", "")
+                      )
+
+                  gmp_pct = ""
+
+                  m = re.search(
+                      r"\(([-+]?\d+(?:\.\d+)?)%\)",
+                      gmp_raw
+                  )
+
+                  if m:
+                      gmp_pct = m.group(1) + "%"
+
+                  price = ""
+
+                  m = re.search(
+                      r"[\d,]+(?:\.\d+)?",
+                      price_raw
+                  )
+
+                  if m:
+                      price = m.group(0)
+
+                  lot = 0
+
+                  m = re.search(
+                      r"[\d,]+",
+                      lot_raw
+                  )
+
+                  if m:
+                      lot = int(
+                          m.group(0).replace(",", "")
+                      )
+
+                  profit = gmp * lot
+
+                  fires = rating_raw.count("🔥")
+
+                  if fires > 0:
+                      quality = "🔥" * fires
+                  else:
+                      quality = "-"
+
+                  records.append({
+                      "name": name,
+                      "quality": quality,
+                      "price": price,
+                      "gmp": gmp,
+                      "gmp_pct": gmp_pct,
+                      "profit": profit,
+                      "open": open_raw,
+                      "close": close_raw,
+                      "allotment": allotment_raw,
+                      "status": status
+                  })
+
+          unique = {}
+
+          for item in records:
+
+              key = item["name"].lower()
+
+              if key not in unique:
+                  unique[key] = item
+
+          records = list(unique.values())
+
+          print("")
+          print("==============================")
+          print(
+              "MAINBOARD IPOs FOUND:",
+              len(records)
+          )
+          print("==============================")
+
+          for item in records:
+              print(
+                  item["name"],
+                  "| GMP:",
+                  item["gmp"],
+                  "| Lot Profit:",
+                  item["profit"]
+              )
+
+          output = {
+              "source": url,
+              "updated": datetime.now(
+                  timezone.utc
+              ).isoformat(),
+              "count": len(records),
+              "data": records
+          }
+
+          with open(
+              "data.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  output,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
+          if len(records) == 0:
+              print("ERROR: No Mainboard IPOs found.")
+              raise SystemExit(1)
+
+          print("")
+          print("SUCCESS!")
+          print(
+              "Saved",
+              len(records),
+              "Mainboard IPOs to data.json"
+          )
+
+          PY
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data.json investorgain_debug.html
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update IPO data"
+            git push
+          fi
