@@ -20,83 +20,172 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      - name: Install requests
-        run: python -m pip install requests
-      - name: Fetch InvestorGain
+
+      - name: Install packages
+        run: |
+          python -m pip install requests pandas lxml
+
+      - name: Fetch and parse InvestorGain
         run: |
           python - <<'PY'
           import requests
-          import re
+          import pandas as pd
           import json
+          import re
           from datetime import datetime, timezone
 
-          url = "https://www.investorgain.com/report/ipo-gmp-live/331/"
+          URL = "https://www.investorgain.com/report/ipo-gmp-live/331/"
 
           headers = {
-              "User-Agent": "Mozilla/5.0"
+              "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+              "Accept-Language": "en-US,en;q=0.9"
           }
 
-          r = requests.get(url, headers=headers, timeout=30)
+          print("Downloading InvestorGain...")
+
+          r = requests.get(URL, headers=headers, timeout=30)
           r.raise_for_status()
 
           html = r.text
 
-          # Convert HTML to readable text
-          from html.parser import HTMLParser
+          print("Downloaded characters:", len(html))
 
-          class Parser(HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.text = []
-              def handle_data(self, data):
-                  x = " ".join(data.split())
-                  if x:
-                      self.text.append(x)
+          # Read all HTML tables
+          tables = pd.read_html(html)
 
-          p = Parser()
-          p.feed(html)
+          print("Tables found:", len(tables))
 
-          text = "\n".join(p.text)
+          target = None
 
-          # Save the raw page for troubleshooting
-          with open("investorgain_raw.txt", "w", encoding="utf-8") as f:
-              f.write(text)
+          for df in tables:
+              cols = [str(c).strip().lower() for c in df.columns]
 
-          print("InvestorGain page downloaded.")
-          print("Characters:", len(text))
+              joined = " ".join(cols)
 
-          # This first version looks for IPO-related rows.
-          # We will refine the parser after seeing the first result.
+              if (
+                  "name" in joined
+                  and "gmp" in joined
+                  and "rating" in joined
+                  and "price" in joined
+                  and "lot" in joined
+              ):
+                  target = df
+                  print("IPO table found.")
+                  print("Columns:", list(df.columns))
+                  break
+
+          if target is None:
+              print("ERROR: InvestorGain IPO table not found.")
+
+              with open("investorgain_debug.html", "w", encoding="utf-8") as f:
+                  f.write(html)
+
+              raise SystemExit(1)
 
           records = []
 
-          lines = [x.strip() for x in text.splitlines() if x.strip()]
+          for _, row in target.iterrows():
 
-          for i, line in enumerate(lines):
+              values = {str(k).strip().lower(): row[k] for k in target.columns}
 
-              if "IPO" not in line.upper():
+              # Locate columns
+              def get_value(keyword):
+                  for key, value in values.items():
+                      if keyword in key:
+                          return value
+                  return ""
+
+              name = str(get_value("name")).strip()
+
+              if not name or name.lower() == "nan":
                   continue
 
-              if "SME" in line.upper():
+              # Mainboard only
+              upper_name = name.upper()
+
+              if "SME" in upper_name:
                   continue
 
-              # Avoid navigation/menu text
-              if len(line) < 3 or len(line) > 250:
-                  continue
+              # GMP
+              gmp_text = str(get_value("gmp"))
+
+              gmp_match = re.search(r"₹?\s*(-?\d+(?:\.\d+)?)", gmp_text)
+
+              if gmp_match:
+                  gmp = float(gmp_match.group(1))
+              else:
+                  gmp = 0
+
+              # GMP percentage
+              pct_match = re.search(r"\((-?\d+(?:\.\d+)?)%\)", gmp_text)
+
+              if pct_match:
+                  gmp_pct = float(pct_match.group(1))
+              else:
+                  gmp_pct = None
+
+              # Rating
+              rating_text = str(get_value("rating"))
+              quality = rating_text.count("🔥")
+
+              # Price
+              price_text = str(get_value("price"))
+
+              price_match = re.search(
+                  r"(\d+(?:\.\d+)?)",
+                  price_text.replace(",", "")
+              )
+
+              price = float(price_match.group(1)) if price_match else None
+
+              # Lot
+              lot_text = str(get_value("lot"))
+
+              lot_match = re.search(
+                  r"(\d[\d,]*)",
+                  lot_text
+              )
+
+              lot = int(lot_match.group(1).replace(",", "")) if lot_match else None
+
+              # Potential profit per lot
+              profit = None
+
+              if lot is not None:
+                  profit = round(gmp * lot)
+
+              # Dates
+              open_date = str(get_value("open")).strip()
+              close_date = str(get_value("close")).strip()
+              allotment = str(get_value("boa")).strip()
+
+              if allotment == "":
+                  allotment = str(get_value("boad")).strip()
+
+              # Status
+              status = ""
+
+              status_match = re.search(r"\s([UOCL])$", name)
+
+              if status_match:
+                  status = status_match.group(1)
+                  name = re.sub(r"\s+[UOCL]$", "", name).strip()
 
               records.append({
-                  "name": line,
-                  "status": "",
-                  "quality": "",
-                  "price": "",
-                  "gmp_pct": None,
-                  "profit": None,
-                  "open": "",
-                  "close": "",
-                  "allotment": ""
+                  "name": name,
+                  "status": status,
+                  "quality": quality,
+                  "price": price,
+                  "gmp": gmp,
+                  "gmp_pct": gmp_pct,
+                  "profit": profit,
+                  "lot": lot,
+                  "open": open_date,
+                  "close": close_date,
+                  "allotment": allotment
               })
 
-          # Remove duplicates
+          # Remove duplicate IPO names
           unique = []
           seen = set()
 
@@ -107,19 +196,28 @@ jobs:
                   seen.add(key)
                   unique.append(item)
 
-          # Limit bad/irrelevant results
-          unique = unique[:50]
-
           payload = {
               "updated": datetime.now(timezone.utc).isoformat(),
-              "source": url,
+              "source": URL,
               "ipo": unique
           }
 
           with open("data.json", "w", encoding="utf-8") as f:
               json.dump(payload, f, ensure_ascii=False, indent=2)
 
-          print("Records written:", len(unique))
+          print("================================")
+          print("Mainboard IPOs:", len(unique))
+          print("================================")
+
+          for item in unique:
+              print(
+                  item["name"],
+                  "| GMP:", item["gmp"],
+                  "| GMP%:", item["gmp_pct"],
+                  "| Price:", item["price"],
+                  "| Lot:", item["lot"]
+              )
+
           PY
 
       - name: Commit updated data
