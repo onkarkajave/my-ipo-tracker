@@ -13,7 +13,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -34,7 +33,7 @@ jobs:
           import json
           import re
           from io import StringIO
-          from datetime import datetime
+          from datetime import datetime, timezone
 
           URL = "https://www.investorgain.com/report/ipo-gmp-live/331/"
 
@@ -44,6 +43,7 @@ jobs:
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/140.0 Mobile Safari/537.36"
               ),
+              "Accept": "text/html,application/xhtml+xml",
               "Accept-Language": "en-US,en;q=0.9"
           }
 
@@ -61,8 +61,11 @@ jobs:
 
           print("Downloaded characters:", len(html))
 
-          # Save HTML for debugging
-          with open("investorgain_debug.html", "w", encoding="utf-8") as f:
+          with open(
+              "investorgain_debug.html",
+              "w",
+              encoding="utf-8"
+          ) as f:
               f.write(html)
 
           print("Trying HTML table parser...")
@@ -73,308 +76,41 @@ jobs:
 
           records = []
 
-          # ---------------------------------------------------------
-          # PARSE INVESTORGAIN TABLE
-          # ---------------------------------------------------------
+          # InvestorGain columns:
+          #
+          # Name
+          # GMP
+          # Rating
+          # Sub
+          # Price
+          # IPO Size
+          # Lot
+          # Open
+          # Close
+          # BoA Dt
+          # Listing
+          # Updated-On
+          # Anchor
 
-          for table_number, df in enumerate(tables):
+          for table_no, df in enumerate(tables):
 
-              print()
+              print("")
               print("======================================")
-              print("TABLE", table_number)
+              print("TABLE", table_no)
               print("Rows:", len(df))
               print("Columns:", len(df.columns))
-              print("Column names:")
-              print(df.columns.tolist())
+              print("Columns:", list(df.columns))
               print("======================================")
 
               if len(df.columns) < 9:
                   continue
 
-              # Flatten MultiIndex columns if necessary
+              # Flatten MultiIndex columns if present
               if isinstance(df.columns, pd.MultiIndex):
                   df.columns = [
                       " ".join(
-                          str(x) for x in col
+                          str(x)
+                          for x in col
                           if str(x).lower() != "nan"
                       ).strip()
                       for col in df.columns
-                  ]
-
-              # InvestorGain table is position based:
-              #
-              # 0 Name
-              # 1 GMP
-              # 2 Rating
-              # 3 Sub
-              # 4 Price
-              # 5 IPO Size
-              # 6 Lot
-              # 7 Open
-              # 8 Close
-              # 9 BoA Dt
-              # 10 Listing
-              # 11 Updated-On
-              # 12 Anchor
-
-              print("First rows:")
-              print(df.head(5).to_string())
-
-              for _, row in df.iterrows():
-
-                  values = list(row)
-
-                  if len(values) < 9:
-                      continue
-
-                  # Safely get columns by position
-                  def get_col(index):
-                      if index < len(values):
-                          value = values[index]
-                          if pd.isna(value):
-                              return ""
-                          return str(value).strip()
-                      return ""
-
-                  name_raw = get_col(0)
-                  gmp_raw = get_col(1)
-                  rating_raw = get_col(2)
-                  price_raw = get_col(4)
-                  lot_raw = get_col(6)
-                  open_raw = get_col(7)
-                  close_raw = get_col(8)
-                  boa_raw = get_col(9)
-                  listing_raw = get_col(10)
-
-                  if not name_raw:
-                      continue
-
-                  name_lower = name_raw.lower()
-
-                  # Ignore header-like rows
-                  if name_lower in ["name", "ipo", "nan"]:
-                      continue
-
-                  # -------------------------------------------------
-                  # MAINBOARD ONLY
-                  # -------------------------------------------------
-
-                  if "sme" in name_lower:
-                      continue
-
-                  # We expect IPO rows
-                  if "ipo" not in name_lower:
-                      continue
-
-                  # -------------------------------------------------
-                  # CLEAN NAME + STATUS
-                  # -------------------------------------------------
-
-                  status = ""
-
-                  status_match = re.search(
-                      r"\s+([UOCLCT])\s*$",
-                      name_raw,
-                      re.IGNORECASE
-                  )
-
-                  if status_match:
-                      status = status_match.group(1).upper()
-                      name = re.sub(
-                          r"\s+[UOCLCT]\s*$",
-                          "",
-                          name_raw,
-                          flags=re.IGNORECASE
-                      ).strip()
-                  else:
-                      name = name_raw.strip()
-
-                  # -------------------------------------------------
-                  # GMP
-                  # -------------------------------------------------
-
-                  gmp = 0
-
-                  gmp_match = re.search(
-                      r"₹\s*([\d,]+)",
-                      gmp_raw
-                  )
-
-                  if gmp_match:
-                      try:
-                          gmp = int(
-                              gmp_match.group(1).replace(",", "")
-                          )
-                      except:
-                          gmp = 0
-
-                  # -------------------------------------------------
-                  # GMP %
-                  # -------------------------------------------------
-
-                  gmp_pct = ""
-
-                  pct_match = re.search(
-                      r"\(([-\d.]+)%\)",
-                      gmp_raw
-                  )
-
-                  if pct_match:
-                      gmp_pct = pct_match.group(1) + "%"
-
-                  # -------------------------------------------------
-                  # PRICE
-                  # -------------------------------------------------
-
-                  price = ""
-
-                  price_match = re.search(
-                      r"([\d,]+(?:\.\d+)?)",
-                      price_raw
-                  )
-
-                  if price_match:
-                      price = price_match.group(1)
-
-                  # -------------------------------------------------
-                  # LOT
-                  # -------------------------------------------------
-
-                  lot = 0
-
-                  lot_match = re.search(
-                      r"([\d,]+)",
-                      lot_raw
-                  )
-
-                  if lot_match:
-                      try:
-                          lot = int(
-                              lot_match.group(1).replace(",", "")
-                          )
-                      except:
-                          lot = 0
-
-                  # -------------------------------------------------
-                  # PROFIT PER LOT
-                  # -------------------------------------------------
-
-                  profit = gmp * lot
-
-                  # -------------------------------------------------
-                  # QUALITY / FIRE RATING
-                  # -------------------------------------------------
-
-                  fire_count = rating_raw.count("🔥")
-
-                  if fire_count > 0:
-                      quality = "🔥" * fire_count
-                  else:
-                      quality = "-"
-
-                  # -------------------------------------------------
-                  # CREATE RECORD
-                  # -------------------------------------------------
-
-                  record = {
-                      "name": name,
-                      "quality": quality,
-                      "price": price,
-                      "gmp": gmp,
-                      "gmp_pct": gmp_pct,
-                      "profit": profit,
-                      "open": open_raw,
-                      "close": close_raw,
-                      "allotment": boa_raw,
-                      "listing": listing_raw,
-                      "status": status
-                  }
-
-                  records.append(record)
-
-          # ---------------------------------------------------------
-          # REMOVE DUPLICATES
-          # ---------------------------------------------------------
-
-          unique = {}
-
-          for record in records:
-              key = record["name"].lower()
-
-              if key not in unique:
-                  unique[key] = record
-
-          records = list(unique.values())
-
-          # ---------------------------------------------------------
-          # SORT
-          # ---------------------------------------------------------
-
-          records.sort(
-              key=lambda x: (
-                  x["open"] == "",
-                  x["open"],
-                  x["name"].lower()
-              )
-          )
-
-          print()
-          print("======================================")
-          print("MAINBOARD IPOs FOUND:", len(records))
-          print("======================================")
-
-          for r in records:
-              print(
-                  r["name"],
-                  "| GMP:", r["gmp"],
-                  "| GMP%:", r["gmp_pct"],
-                  "| Lot:", r["profit"]
-              )
-
-          # ---------------------------------------------------------
-          # SAVE DATA
-          # ---------------------------------------------------------
-
-          output = {
-              "source": URL,
-              "updated": datetime.utcnow().isoformat() + "Z",
-              "count": len(records),
-              "data": records
-          }
-
-          with open(
-              "data.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              json.dump(
-                  output,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          if len(records) == 0:
-
-              print()
-              print("ERROR: No Mainboard IPO records found.")
-              print("InvestorGain HTML was downloaded successfully.")
-              print("Debug file: investorgain_debug.html")
-
-              raise SystemExit(1)
-
-          print()
-          print("data.json created successfully.")
-          print("Records:", len(records))
-          PY
-
-      - name: Commit updated data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add data.json investorgain_debug.html
-
-          git diff --cached --quiet || git commit -m "Update IPO data"
-
-          git push
