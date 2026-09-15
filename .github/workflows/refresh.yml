@@ -17,13 +17,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
       - name: Install packages
         run: |
-          python -m pip install requests pandas lxml
+          python -m pip install --upgrade pip
+          python -m pip install requests pandas lxml beautifulsoup4
 
       - name: Fetch and parse InvestorGain
         run: |
@@ -32,194 +33,482 @@ jobs:
           import pandas as pd
           import json
           import re
+          from io import StringIO
           from datetime import datetime, timezone
+          from bs4 import BeautifulSoup
 
           URL = "https://www.investorgain.com/report/ipo-gmp-live/331/"
 
           headers = {
-              "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+              "User-Agent": (
+                  "Mozilla/5.0 (Linux; Android 10) "
+                  "AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) "
+                  "Chrome/140.0 Mobile Safari/537.36"
+              ),
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
               "Accept-Language": "en-US,en;q=0.9"
           }
 
           print("Downloading InvestorGain...")
 
-          r = requests.get(URL, headers=headers, timeout=30)
-          r.raise_for_status()
+          response = requests.get(
+              URL,
+              headers=headers,
+              timeout=30
+          )
 
-          html = r.text
+          response.raise_for_status()
+
+          html = response.text
 
           print("Downloaded characters:", len(html))
 
-      
-
-          # Read all HTML tables
-from io import StringIO
-tables = pd.read_html(StringIO(html))
-
-          print("Tables found:", len(tables))
-
-          target = None
-
-          for df in tables:
-              cols = [str(c).strip().lower() for c in df.columns]
-
-              joined = " ".join(cols)
-
-              if (
-                  "name" in joined
-                  and "gmp" in joined
-                  and "rating" in joined
-                  and "price" in joined
-                  and "lot" in joined
-              ):
-                  target = df
-                  print("IPO table found.")
-                  print("Columns:", list(df.columns))
-                  break
-
-          if target is None:
-              print("ERROR: InvestorGain IPO table not found.")
-
-              with open("investorgain_debug.html", "w", encoding="utf-8") as f:
-                  f.write(html)
-
-              raise SystemExit(1)
+          # Save downloaded HTML for troubleshooting
+          with open(
+              "investorgain_debug.html",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              f.write(html)
 
           records = []
 
-          for _, row in target.iterrows():
+          # ------------------------------------------------------------
+          # METHOD 1: Try normal HTML tables
+          # ------------------------------------------------------------
 
-              values = {str(k).strip().lower(): row[k] for k in target.columns}
+          print("Trying HTML table parser...")
 
-              # Locate columns
-              def get_value(keyword):
-                  for key, value in values.items():
-                      if keyword in key:
-                          return value
-                  return ""
+          try:
+              tables = pd.read_html(StringIO(html))
 
-              name = str(get_value("name")).strip()
+              print("Tables found:", len(tables))
 
-              if not name or name.lower() == "nan":
-                  continue
+              for df in tables:
 
-              # Mainboard only
-              upper_name = name.upper()
+                  columns = [
+                      str(c).strip().lower()
+                      for c in df.columns
+                  ]
 
-              if "SME" in upper_name:
-                  continue
+                  joined = " ".join(columns)
 
-              # GMP
-              gmp_text = str(get_value("gmp"))
+                  if (
+                      "name" in joined
+                      and "gmp" in joined
+                      and "rating" in joined
+                      and "price" in joined
+                      and "lot" in joined
+                  ):
 
-              gmp_match = re.search(r"₹?\s*(-?\d+(?:\.\d+)?)", gmp_text)
+                      print("IPO table found.")
 
-              if gmp_match:
-                  gmp = float(gmp_match.group(1))
-              else:
-                  gmp = 0
+                      for _, row in df.iterrows():
 
-              # GMP percentage
-              pct_match = re.search(r"\((-?\d+(?:\.\d+)?)%\)", gmp_text)
+                          row_values = {}
 
-              if pct_match:
-                  gmp_pct = float(pct_match.group(1))
-              else:
-                  gmp_pct = None
+                          for column in df.columns:
+                              key = str(column).strip().lower()
+                              row_values[key] = row[column]
 
-              # Rating
-              rating_text = str(get_value("rating"))
-              quality = rating_text.count("🔥")
+                          def value_contains(text):
+                              for key, value in row_values.items():
+                                  if text in key:
+                                      return str(value)
+                              return ""
 
-              # Price
-              price_text = str(get_value("price"))
+                          name = value_contains("name").strip()
 
-              price_match = re.search(
-                  r"(\d+(?:\.\d+)?)",
-                  price_text.replace(",", "")
+                          if not name or name.lower() == "nan":
+                              continue
+
+                          # Mainboard only
+                          if "SME" in name.upper():
+                              continue
+
+                          gmp_text = value_contains("gmp")
+
+                          price_text = value_contains("price")
+
+                          rating_text = value_contains("rating")
+
+                          lot_text = value_contains("lot")
+
+                          open_text = value_contains("open")
+
+                          close_text = value_contains("close")
+
+                          allotment_text = value_contains("boa")
+
+                          # GMP
+                          gmp_match = re.search(
+                              r"₹?\s*(-?\d+(?:\.\d+)?)",
+                              gmp_text
+                          )
+
+                          gmp = (
+                              float(gmp_match.group(1))
+                              if gmp_match
+                              else 0
+                          )
+
+                          # GMP %
+                          pct_match = re.search(
+                              r"\((-?\d+(?:\.\d+)?)%\)",
+                              gmp_text
+                          )
+
+                          gmp_pct = (
+                              float(pct_match.group(1))
+                              if pct_match
+                              else None
+                          )
+
+                          # Price
+                          price_match = re.search(
+                              r"(\d+(?:\.\d+)?)",
+                              price_text.replace(",", "")
+                          )
+
+                          price = (
+                              float(price_match.group(1))
+                              if price_match
+                              else None
+                          )
+
+                          # Rating
+                          quality = rating_text.count("🔥")
+
+                          # Lot
+                          lot_match = re.search(
+                              r"(\d[\d,]*)",
+                              lot_text
+                          )
+
+                          lot = (
+                              int(
+                                  lot_match.group(1)
+                                  .replace(",", "")
+                              )
+                              if lot_match
+                              else None
+                          )
+
+                          # Profit
+                          profit = (
+                              round(gmp * lot)
+                              if lot is not None
+                              else None
+                          )
+
+                          # Status
+                          status = ""
+
+                          status_match = re.search(
+                              r"\s([UOCL])$",
+                              name
+                          )
+
+                          if status_match:
+                              status = status_match.group(1)
+                              name = re.sub(
+                                  r"\s+[UOCL]$",
+                                  "",
+                                  name
+                              ).strip()
+
+                          records.append({
+                              "name": name,
+                              "status": status,
+                              "quality": quality,
+                              "price": price,
+                              "gmp": gmp,
+                              "gmp_pct": gmp_pct,
+                              "profit": profit,
+                              "lot": lot,
+                              "open": open_text,
+                              "close": close_text,
+                              "allotment": allotment_text
+                          })
+
+                      if records:
+                          break
+
+          except Exception as e:
+
+              print("HTML table parser failed:")
+              print(type(e).__name__, str(e))
+
+          # ------------------------------------------------------------
+          # METHOD 2: Parse visible text if no HTML table was found
+          # ------------------------------------------------------------
+
+          if not records:
+
+              print("No table records found.")
+              print("Trying text parser...")
+
+              soup = BeautifulSoup(
+                  html,
+                  "html.parser"
               )
 
-              price = float(price_match.group(1)) if price_match else None
+              for tag in soup(
+                  ["script", "style", "noscript"]
+              ):
+                  tag.decompose()
 
-              # Lot
-              lot_text = str(get_value("lot"))
+              text = soup.get_text("\n")
 
-              lot_match = re.search(
-                  r"(\d[\d,]*)",
-                  lot_text
-              )
+              lines = []
 
-              lot = int(lot_match.group(1).replace(",", "")) if lot_match else None
+              for line in text.splitlines():
 
-              # Potential profit per lot
-              profit = None
+                  line = " ".join(line.split())
 
-              if lot is not None:
-                  profit = round(gmp * lot)
+                  if line:
+                      lines.append(line)
 
-              # Dates
-              open_date = str(get_value("open")).strip()
-              close_date = str(get_value("close")).strip()
-              allotment = str(get_value("boa")).strip()
+              # Find IPO-name lines
+              for i, line in enumerate(lines):
 
-              if allotment == "":
-                  allotment = str(get_value("boad")).strip()
+                  upper = line.upper()
 
-              # Status
-              status = ""
+                  if "IPO" not in upper:
+                      continue
 
-              status_match = re.search(r"\s([UOCL])$", name)
+                  # Exclude SME
+                  if "SME" in upper:
+                      continue
 
-              if status_match:
-                  status = status_match.group(1)
-                  name = re.sub(r"\s+[UOCL]$", "", name).strip()
+                  # Exclude headings/navigation
+                  if upper in (
+                      "IPO",
+                      "LIVE IPO GMP",
+                      "IPO GMP",
+                      "CURRENT IPO GMP"
+                  ):
+                      continue
 
-              records.append({
-                  "name": name,
-                  "status": status,
-                  "quality": quality,
-                  "price": price,
-                  "gmp": gmp,
-                  "gmp_pct": gmp_pct,
-                  "profit": profit,
-                  "lot": lot,
-                  "open": open_date,
-                  "close": close_date,
-                  "allotment": allotment
-              })
+                  # Name should normally end with status
+                  if not re.search(
+                      r"\s(?:U|O|C|L|CT)\b",
+                      line
+                  ):
+                      continue
 
-          # Remove duplicate IPO names
+                  name = line
+
+                  # Look ahead for row information
+                  block = " ".join(
+                      lines[i:i + 15]
+                  )
+
+                  # GMP
+                  gmp_match = re.search(
+                      r"₹\s*(-?\d+(?:\.\d+)?)\s*\(\s*(-?\d+(?:\.\d+)?)%\s*\)",
+                      block
+                  )
+
+                  if gmp_match:
+                      gmp = float(gmp_match.group(1))
+                      gmp_pct = float(gmp_match.group(2))
+                  else:
+                      continue
+
+                  # Rating
+                  rating_match = re.search(
+                      r"(🔥+)",
+                      block
+                  )
+
+                  quality = (
+                      len(rating_match.group(1))
+                      if rating_match
+                      else 0
+                  )
+
+                  # Remove status from name
+                  status_match = re.search(
+                      r"\s([UOCL])$",
+                      name
+                  )
+
+                  status = ""
+
+                  if status_match:
+                      status = status_match.group(1)
+                      name = re.sub(
+                          r"\s+[UOCL]$",
+                          "",
+                          name
+                      ).strip()
+
+                  # Price
+                  price = None
+
+                  price_match = re.search(
+                      r"🔥+\s*[-–—]?\s*(?:₹)?\s*(\d+(?:\.\d+)?)",
+                      block
+                  )
+
+                  if not price_match:
+                      numbers = re.findall(
+                          r"\b\d+(?:\.\d+)?\b",
+                          block
+                      )
+
+                      if numbers:
+                          # The first number after the GMP/rating area
+                          # is usually the IPO price.
+                          for number in numbers:
+                              n = float(number)
+
+                              if n > 0 and n != gmp:
+                                  price = n
+                                  break
+                  else:
+                      price = float(
+                          price_match.group(1)
+                      )
+
+                  # Lot
+                  lot = None
+
+                  # Search common numeric sequence after price
+                  lot_matches = re.findall(
+                      r"\b\d[\d,]*\b",
+                      block
+                  )
+
+                  if lot_matches:
+
+                      possible = []
+
+                      for x in lot_matches:
+                          try:
+                              n = int(
+                                  x.replace(",", "")
+                              )
+
+                              if n > 0:
+                                  possible.append(n)
+                          except:
+                              pass
+
+                      if possible:
+                          # Lot is generally one of the smaller
+                          # numbers in the row.
+                          for n in possible:
+                              if n != int(gmp) and n != int(price or 0):
+                                  lot = n
+                                  break
+
+                  profit = (
+                      round(gmp * lot)
+                      if lot is not None
+                      else None
+                  )
+
+                  # Dates
+                  dates = re.findall(
+                      r"\b\d{1,2}-[A-Za-z]{3}\b",
+                      block
+                  )
+
+                  open_date = dates[0] if len(dates) >= 1 else ""
+                  close_date = dates[1] if len(dates) >= 2 else ""
+                  allotment = dates[2] if len(dates) >= 3 else ""
+
+                  records.append({
+                      "name": name,
+                      "status": status,
+                      "quality": quality,
+                      "price": price,
+                      "gmp": gmp,
+                      "gmp_pct": gmp_pct,
+                      "profit": profit,
+                      "lot": lot,
+                      "open": open_date,
+                      "close": close_date,
+                      "allotment": allotment
+                  })
+
+          # ------------------------------------------------------------
+          # Remove duplicates
+          # ------------------------------------------------------------
+
           unique = []
+
           seen = set()
 
           for item in records:
-              key = item["name"].lower()
 
-              if key not in seen:
-                  seen.add(key)
-                  unique.append(item)
+              key = item["name"].lower().strip()
+
+              if not key:
+                  continue
+
+              if key in seen:
+                  continue
+
+              seen.add(key)
+
+              unique.append(item)
+
+          # ------------------------------------------------------------
+          # Save data
+          # ------------------------------------------------------------
 
           payload = {
-              "updated": datetime.now(timezone.utc).isoformat(),
+              "updated": datetime.now(
+                  timezone.utc
+              ).isoformat(),
+
               "source": URL,
+
               "ipo": unique
           }
 
-          with open("data.json", "w", encoding="utf-8") as f:
-              json.dump(payload, f, ensure_ascii=False, indent=2)
+          with open(
+              "data.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
 
-          print("================================")
-          print("Mainboard IPOs:", len(unique))
-          print("================================")
+              json.dump(
+                  payload,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
+          print("")
+          print("==============================")
+          print("MAINBOARD IPOs FOUND:", len(unique))
+          print("==============================")
 
           for item in unique:
+
               print(
                   item["name"],
                   "| GMP:", item["gmp"],
                   "| GMP%:", item["gmp_pct"],
+                  "| Quality:", item["quality"],
                   "| Price:", item["price"],
-                  "| Lot:", item["lot"]
+                  "| Lot:", item["lot"],
+                  "| Profit:", item["profit"]
               )
+
+          if not unique:
+
+              print("")
+              print("ERROR: No Mainboard IPO records found.")
+              print("InvestorGain HTML was downloaded successfully.")
+              print("Debug HTML saved as investorgain_debug.html")
+
+              raise SystemExit(1)
 
           PY
 
