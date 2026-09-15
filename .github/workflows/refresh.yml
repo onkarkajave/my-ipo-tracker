@@ -50,8 +50,11 @@ jobs:
 
           print("Downloaded characters:", len(html))
 
+      
+
           # Read all HTML tables
-          tables = pd.read_html(html)
+from io import StringIO
+tables = pd.read_html(StringIO(html))
 
           print("Tables found:", len(tables))
 
