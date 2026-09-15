@@ -1,0 +1,136 @@
+name: Refresh IPO Data
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17,47 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get repository
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Fetch InvestorGain
+        run: |
+          python - <<'PY'
+          import requests
+          import re
+          import json
+          from datetime import datetime, timezone
+
+          url = "https://www.investorgain.com/report/ipo-gmp-live/331/"
+
+          headers = {
+              "User-Agent": "Mozilla/5.0"
+          }
+
+          r = requests.get(url, headers=headers, timeout=30)
+          r.raise_for_status()
+
+          html = r.text
+
+          # Convert HTML to readable text
+          from html.parser import HTMLParser
+
+          class Parser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.text = []
+              def handle_data(self, data):
+                  x = " ".join(data.split())
+                  if x:
+                      self.text.append(x)
+
+          p = Parser()
+          p.feed(html)
+
+          text = "\n".join(p.text)
+
+          # Save the raw page for troubleshooting
+          with open("investorgain_raw.txt", "w", encoding="utf-8") as f:
+              f.write(text)
+
+          print("InvestorGain page downloaded.")
+          print("Characters:", len(text))
+
+          # This first version looks for IPO-related rows.
+          # We will refine the parser after seeing the first result.
+
+          records = []
+
+          lines = [x.strip() for x in text.splitlines() if x.strip()]
+
+          for i, line in enumerate(lines):
+
+              if "IPO" not in line.upper():
+                  continue
+
+              if "SME" in line.upper():
+                  continue
+
+              # Avoid navigation/menu text
+              if len(line) < 3 or len(line) > 250:
+                  continue
+
+              records.append({
+                  "name": line,
+                  "status": "",
+                  "quality": "",
+                  "price": "",
+                  "gmp_pct": None,
+                  "profit": None,
+                  "open": "",
+                  "close": "",
+                  "allotment": ""
+              })
+
+          # Remove duplicates
+          unique = []
+          seen = set()
+
+          for item in records:
+              key = item["name"].lower()
+
+              if key not in seen:
+                  seen.add(key)
+                  unique.append(item)
+
+          # Limit bad/irrelevant results
+          unique = unique[:50]
+
+          payload = {
+              "updated": datetime.now(timezone.utc).isoformat(),
+              "source": url,
+              "ipo": unique
+          }
+
+          with open("data.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f, ensure_ascii=False, indent=2)
+
+          print("Records written:", len(unique))
+          PY
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data.json
+
+          if git diff --cached --quiet; then
+            echo "No changes."
+          else
+            git commit -m "Refresh IPO data"
+            git push
+          fi
